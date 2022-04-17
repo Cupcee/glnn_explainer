@@ -37,7 +37,8 @@ class MLP(nn.Module):
 
             self.layers.append(nn.Linear(hidden_dim, output_dim))
 
-    def get_emb(self, feats):
+
+    def forward(self, feats):
         h = feats
         for l, layer in enumerate(self.layers):
             h = layer(h)
@@ -47,7 +48,3 @@ class MLP(nn.Module):
                 h = F.relu(h)
                 h = self.dropout(h)
         return h
-
-
-    def forward(self, feats):
-        return self.get_emb(feats)

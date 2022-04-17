@@ -8,7 +8,7 @@ from dig.xgraph.method.base_explainer import ExplainerBase
 from torch import Tensor
 from typing import List, Dict, Tuple
 from torch_geometric.utils import add_self_loops, degree
-from mlp import MLP
+from glnns.mlp import MLP
 
 class PGExplainer_edges(ExplainerBase):
     def __init__(self, pgexplainer, model, molecule: bool):

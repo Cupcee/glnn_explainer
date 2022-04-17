@@ -570,21 +570,25 @@ class PGExplainer(nn.Module):
         nodesize = embed.shape[0]
         feature_dim = embed.shape[1]
         # TODO: pass both f1 and f2 through MLP
-        print(embed.shape)
-        if self.explain_graph:
-            col, row = edge_index
-            f1 = embed[col]
-            f2 = embed[row]
-            f12self = torch.cat([f1, f2], dim=-1)
-        else:
-            col, row = edge_index
-            f1 = embed[col]
-            f2 = embed[row]
-            self_embed = embed[node_idx].repeat(f1.shape[0], 1)
-            f12self = torch.cat([f1, f2, self_embed], dim=-1)
+        #if self.explain_graph:
+        #    col, row = edge_index
+        #    f1 = embed[col]
+        #    f2 = embed[row]
+        #    f12self = torch.cat([f1, f2], dim=-1)
+        #else:
+        #    col, row = edge_index
+        #    f1 = embed[col]
+        #    f2 = embed[row]
+        #    self_embed = embed[node_idx].repeat(f1.shape[0], 1)
+        #    f12self = torch.cat([f1, f2, self_embed], dim=-1)
+
+        col, row = edge_index
+        f1 = embed[col]
+        f2 = embed[row]
+        self_embed = embed[node_idx].repeat(f1.shape[0], 1)
+        f12self = torch.cat([f1, f2, self_embed], dim=-1)
 
         # using the node embedding to calculate the edge weight
-        print(f12self.shape)
         h = f12self.to(self.device)
         for elayer in self.elayers:
             h = elayer(h)
@@ -613,75 +617,53 @@ class PGExplainer(nn.Module):
     def train_explanation_network(self, dataset):
         r""" training the explanation network by gradient descent(GD) using Adam optimizer """
         optimizer = Adam(self.elayers.parameters(), lr=self.lr)
-        if self.explain_graph:
-            with torch.no_grad():
-                dataset_indices = list(range(len(dataset)))
-                self.model.eval()
-                emb_dict = {}
-                ori_pred_dict = {}
-                for gid in tqdm.tqdm(dataset_indices):
-                    data = dataset[gid].to(self.device)
-                    logits = self.model(data.x)
-                    emb = self.model.get_emb(data.x)
-                    emb_dict[gid] = emb.data.cpu()
-                    ori_pred_dict[gid] = logits.argmax(-1).data.cpu()
+        
+        with torch.no_grad():
+            data = dataset[0]
+            data.to(self.device)
+            self.model.eval()
+            explain_node_index_list = torch.where(data.train_mask)[0].tolist()
+            pred_dict = {}
+            logits = self.model(data.x)
+            for node_idx in tqdm.tqdm(explain_node_index_list):
+                pred_dict[node_idx] = logits[node_idx].argmax(-1).item()
 
-            # train the mask generator
-            duration = 0.0
-            for epoch in range(self.epochs):
-                loss = 0.0
-                pred_list = []
-                tmp = float(self.t0 * np.power(self.t1 / self.t0, epoch / self.epochs))
-                self.elayers.train()
-                optimizer.zero_grad()
-                tic = time.perf_counter()
-                for gid in tqdm.tqdm(dataset_indices):
-                    data = dataset[gid]
-                    data.to(self.device)
-                    prob, edge_mask = self.explain(data.x, data.edge_index, embed=emb_dict[gid], tmp=tmp, training=True)
-                    loss_tmp = self.__loss__(prob.squeeze(), ori_pred_dict[gid])
-                    loss_tmp.backward()
-                    loss += loss_tmp.item()
-                    pred_label = prob.argmax(-1).item()
-                    pred_list.append(pred_label)
+        # train the mask generator
+        duration = 0.0
+        for epoch in range(self.epochs):
+            loss = 0.0
+            optimizer.zero_grad()
+            tmp = float(self.t0 * np.power(self.t1 / self.t0, epoch / self.epochs))
+            self.elayers.train()
+            tic = time.perf_counter()
+            for iter_idx, node_idx in tqdm.tqdm(enumerate(explain_node_index_list)):
+                with torch.no_grad():
+                    x, edge_index, y, subset, _ = \
+                        self.get_subgraph(node_idx=node_idx, x=data.x, edge_index=data.edge_index, y=data.y)
+                    new_node_index = int(torch.where(subset == node_idx)[0])
+                    emb = self.model(data.x)
 
-                optimizer.step()
-                duration += time.perf_counter() - tic
-                print(f'Epoch: {epoch} | Loss: {loss}')
-        else:
-            with torch.no_grad():
-                data = dataset[0]
-                data.to(self.device)
-                self.model.eval()
-                explain_node_index_list = torch.where(data.train_mask)[0].tolist()
-                pred_dict = {}
-                logits = self.model(data.x)
-                for node_idx in tqdm.tqdm(explain_node_index_list):
-                    pred_dict[node_idx] = logits[node_idx].argmax(-1).item()
+                #    def explain(self,
+                #                x: Tensor,
+                #                edge_index: Tensor,
+                #                f1: Tensor,
+                #                f2: Tensor,
+                #                self_embed: Tensor,
+                #                #embed: Tensor,
+                #                tmp: float = 1.0,
+                #                training: bool = False,
+                #                **kwargs)\
+                #            -> Tuple[float, Tensor]:
 
-            # train the mask generator
-            duration = 0.0
-            for epoch in range(self.epochs):
-                loss = 0.0
-                optimizer.zero_grad()
-                tmp = float(self.t0 * np.power(self.t1 / self.t0, epoch / self.epochs))
-                self.elayers.train()
-                tic = time.perf_counter()
-                for iter_idx, node_idx in tqdm.tqdm(enumerate(explain_node_index_list)):
-                    with torch.no_grad():
-                        x, edge_index, y, subset, _ = \
-                            self.get_subgraph(node_idx=node_idx, x=data.x, edge_index=data.edge_index, y=data.y)
-                        emb = self.model.get_emb(data.x)
-                        new_node_index = int(torch.where(subset == node_idx)[0])
-                    pred, edge_mask = self.explain(x, edge_index, emb, tmp, training=True, node_idx=new_node_index)
-                    loss_tmp = self.__loss__(pred[new_node_index], pred_dict[node_idx])
-                    loss_tmp.backward()
-                    loss += loss_tmp.item()
+                pred, edge_mask = self.explain(x, edge_index, emb, tmp, training=True, node_idx=new_node_index)
+                loss_tmp = self.__loss__(pred[new_node_index], pred_dict[node_idx])
+                loss_tmp.backward()
+                loss += loss_tmp.item()
 
-                optimizer.step()
-                duration += time.perf_counter() - tic
-                print(f'Epoch: {epoch} | Loss: {loss/len(explain_node_index_list)}')
-            print(f"training time is {duration:.5}s")
+            optimizer.step()
+            duration += time.perf_counter() - tic
+            print(f'Epoch: {epoch} | Loss: {loss/len(explain_node_index_list)}')
+        print(f"training time is {duration:.5}s")
 
     def forward(self,
                 x: Tensor,
