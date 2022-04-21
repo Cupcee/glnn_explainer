@@ -38,8 +38,8 @@ class MLP(nn.Module):
             self.layers.append(nn.Linear(hidden_dim, output_dim))
 
 
-    def forward(self, feats):
-        h = feats
+    def forward(self, x, **kwargs):
+        h = x
         for l, layer in enumerate(self.layers):
             h = layer(h)
             if l != self.num_layers - 1:

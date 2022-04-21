@@ -100,6 +100,7 @@ def k_hop_subgraph_with_default_whole_graph(
     node_mask[subset] = True
     edge_mask = node_mask[row] & node_mask[col]
 
+
     edge_index = edge_index[:, edge_mask]
 
     if relabel_nodes:
@@ -471,8 +472,8 @@ class PGExplainer(nn.Module):
 
     def __loss__(self, prob: Tensor, ori_pred: int):
         logit = prob[ori_pred]
-        logit = logit + EPS
-        pred_loss = - torch.log(logit)
+        pred_loss = - logit + EPS
+        #pred_loss = - torch.log(logit)
 
         # size
         edge_mask = self.sparse_mask_values
@@ -483,6 +484,8 @@ class PGExplainer(nn.Module):
         mask_ent = - edge_mask * torch.log(edge_mask) - (1 - edge_mask) * torch.log(1 - edge_mask)
         mask_ent_loss = self.coff_ent * torch.mean(mask_ent)
 
+        
+        #print(f"pred_loss: {pred_loss}")
         loss = pred_loss + size_loss + mask_ent_loss
         return loss
 
@@ -512,11 +515,9 @@ class PGExplainer(nn.Module):
         num_nodes, num_edges = x.size(0), edge_index.size(1)
         graph = to_networkx(data=Data(x=x, edge_index=edge_index), to_undirected=True)
 
-        print(edge_index.shape)
         subset, edge_index, _, edge_mask = k_hop_subgraph_with_default_whole_graph(
             edge_index, node_idx, self.num_hops, relabel_nodes=True,
             num_nodes=num_nodes, flow=self.__flow__())
-        print(edge_index.shape)
 
         mapping = {int(v): k for k, v in enumerate(subset)}
         subgraph = graph.subgraph(subset.tolist())
@@ -571,19 +572,9 @@ class PGExplainer(nn.Module):
             probs (:obj:`torch.Tensor`): The classification probability for graph with edge mask
             edge_mask (:obj:`torch.Tensor`): The probability mask for graph edges
         """
-        # TODO: pass both f1 and f2 through MLP
-        #if self.explain_graph:
-        #    col, row = edge_index
-        #    f1 = embed[col]
-        #    f2 = embed[row]
-        #    f12self = torch.cat([f1, f2], dim=-1)
-        #else:
-        #    col, row = edge_index
-        #    f1 = embed[col]
-        #    f2 = embed[row]
-        #    self_embed = embed[node_idx].repeat(f1.shape[0], 1)
-        #    f12self = torch.cat([f1, f2, self_embed], dim=-1)
-        f12self = torch.cat([f1.squeeze(0), f2.squeeze(0), self_embed], dim=-1)
+        nodesize, feature_dim = f1.shape
+        self_embed = self_embed.repeat(nodesize, 1)
+        f12self = torch.cat([f1, f2, self_embed], dim=-1)
 
         # using the node embedding to calculate the edge weight
         h = f12self.to(self.device)
@@ -606,7 +597,7 @@ class PGExplainer(nn.Module):
 
         # the model prediction with edge mask
         logits = self.model(x)
-        probs = F.softmax(logits, dim=-1)
+        probs = logits.log_softmax(dim=1)
 
         self.__clear_masks__()
         return probs, edge_mask
@@ -635,25 +626,13 @@ class PGExplainer(nn.Module):
             tic = time.perf_counter()
             for iter_idx, node_idx in tqdm.tqdm(enumerate(explain_node_index_list)):
                 with torch.no_grad():
-                    x, edge_index, y, subset, _ = \
-                        self.get_subgraph(node_idx=node_idx, x=data.x, edge_index=data.edge_index, y=data.y)
+                    x, edge_index, y, subset, _ = self.get_subgraph(node_idx=node_idx, x=data.x, edge_index=data.edge_index, y=data.y)
                     new_node_index = int(torch.where(subset == node_idx)[0])
                     col, row = edge_index
-                    f1 = self.model(data.x[col])
-                    f2 = self.model(data.x[row])
-                    self_embed = self.model(data.x[new_node_index])
-
-                #    def explain(self,
-                #                x: Tensor,
-                #                edge_index: Tensor,
-                #                f1: Tensor,
-                #                f2: Tensor,
-                #                self_embed: Tensor,
-                #                #embed: Tensor,
-                #                tmp: float = 1.0,
-                #                training: bool = False,
-                #                **kwargs)\
-                #            -> Tuple[float, Tensor]:
+                    f = self.model(data.x).log_softmax(dim=1)
+                    f1 = f[col]
+                    f2 = f[row]
+                    self_embed = f[new_node_index]
 
                 pred, edge_mask = self.explain(
                         x,
@@ -699,9 +678,9 @@ class PGExplainer(nn.Module):
 
         self.__clear_masks__()
         logits = self.model(x)
-        probs = F.softmax(logits, dim=-1)
+        probs = logits.log_softmax(dim=1)
         pred_labels = probs.argmax(dim=-1)
-        embed = self.model.get_emb(x)
+        embed = self.model(x)
 
         if self.explain_graph:
             # original value
@@ -733,7 +712,7 @@ class PGExplainer(nn.Module):
             # masked value
             x, edge_index, _, subset, _ = self.get_subgraph(node_idx, x, edge_index)
             new_node_idx = torch.where(subset == node_idx)[0]
-            embed = self.model.get_emb(x)
+            embed = self.model(x)
             _, edge_mask = self.explain(x, edge_index, embed, tmp=1.0, training=False, node_idx=new_node_idx)
 
             data = Data(x=x, edge_index=edge_index)

@@ -99,4 +99,4 @@ data = {"accs": accs, "dataset": args.dataset, "lr": args.lr,
         "n_hidden_layers": args.n_hidden_layers, "p_dropout": args.p_dropout}
 with open(f"results/{args.dataset}_accs.json", "w") as f:
     json.dump(data, f, indent=4)
-torch.save(model, f"gnns/{args.dataset}.pt")
+torch.save(model.state_dict(), f"gnns/{args.dataset}.pt")
