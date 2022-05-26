@@ -1,5 +1,6 @@
 import datetime
 import os
+import copy
 import torch
 import torch.nn.functional as F
 import argparse
@@ -11,6 +12,7 @@ from torch import Tensor
 from typing import List, Dict, Tuple
 from torch_geometric.utils import add_self_loops, degree
 from glnns.mlp import MLP
+from glnns.gcn import GCN
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -60,11 +62,12 @@ class PGExplainer_edges(ExplainerBase):
 
         new_node_idx = torch.where(subset == node_idx)[0]
         col, row = edge_index
+
         f = self.model(x).log_softmax(dim=1)
         f1 = f[col]
         f2 = f[row]
         self_embed = f[new_node_idx]
-        _, edge_mask = self.explainer.explain(x,
+        pred, edge_mask = self.explainer.explain(x,
                                               edge_index,
                                               f1,
                                               f2,
@@ -86,12 +89,19 @@ class PGExplainer_edges(ExplainerBase):
 
         self.__clear_masks__()
 
-        return edge_masks, hard_edge_masks, related_preds 
 
+        return 
+
+# "dataset": "Tree_Cycle",
+# "lr": 0.001,
+# "epochs": 300,
+# "dim_hidden": 300,
+# "n_layers": 2,
+# "p_dropout": 0.0
 
 args = parse_args()
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-if args.dataset == "BA_shapes" or args.dataset == "Tree_Cycle" or args.dataset == "Tree_Grid":
+if args.dataset == "BA_shapes":
     # load dataset
     dataset = SynGraphDataset(root='dig_datasets/', name=args.dataset)
     dataset.data.to(device)
@@ -106,8 +116,34 @@ if args.dataset == "BA_shapes" or args.dataset == "Tree_Cycle" or args.dataset =
     hidden_dim = 300
     num_classes = dataset.num_classes
     # load trained GNN
-    model = torch.load(f"gnns/{args.dataset}.pt")
+    state_dict = torch.load(f"glnns/gnns/{args.dataset.lower()}.pt")
+    model = GCN(dim_node=dim_node, dim_hidden=300, num_classes=num_classes,
+                n_hidden_layers=2, p_dropout=0)
+    model.load_state_dict(state_dict)
     model.to(device)
+
+elif args.dataset == "Tree_Cycle":
+    # load dataset
+    dataset = SynGraphDataset(root='dig_datasets/', name=args.dataset)
+    dataset.data.to(device)
+    dataset.data.x = dataset.data.x.to(torch.float32)
+    dataset.data.x = dataset.data.x[:, :1]
+    # use node degree as feature for MLP
+    degrees = degree(dataset.data.edge_index[0], dtype=torch.int64)
+    x = F.one_hot(degrees).float().to(device) 
+    dim_node_mlp = x.shape[1]
+    dim_node = dataset.num_node_features
+    dim_edge = dataset.num_edge_features
+    hidden_dim = 300
+    num_classes = dataset.num_classes
+    # load trained GNN
+    state_dict = torch.load(f"glnns/gnns/{args.dataset.lower()}.pt")
+    model = GCN(dim_node=dim_node, dim_hidden=300, num_classes=num_classes,
+                n_hidden_layers=2, p_dropout=0)
+    model.load_state_dict(state_dict)
+    model.to(device)
+
+
 elif args.dataset == "BA_Community":
     # load dataset
     dataset = SynGraphDataset(root='dig_datasets/', name='BA_Community')
@@ -119,7 +155,11 @@ elif args.dataset == "BA_Community":
     dim_edge = dataset.num_edge_features
     hidden_dim = 300
     num_classes = dataset.num_classes
-    model = torch.load('gnns/BA_Community.pt')
+    state_dict = torch.load(f"glnns/gnns/ba_community.pt")
+    model = GCN(dim_node=dim_node, dim_hidden=hidden_dim, num_classes=num_classes,
+                n_hidden_layers=8, p_dropout=0.1)
+    model.load_state_dict(state_dict)
+    model.to(device)
 else:
     raise Exception("Unknown dataset")
 
@@ -144,37 +184,18 @@ explainer = PGExplainer(
 
 # train
 if args.train:
-    print("Training...")
+    print(f"Training for dataset {args.dataset}...")
+    dataset = copy.copy(dataset[0])
+    dataset.x = x
     explainer.train_explanation_network(dataset)
     torch.save(explainer.state_dict(), "models/pg_explainer.pt")
 
 print("Loading state dict")
 explainer.load_state_dict(torch.load("models/pg_explainer.pt"))
 
-index = 0
-x_collector = XCollector()
-pgexplainer_edges = PGExplainer_edges(pgexplainer=explainer,
-                                      model=glnn,
-                                      molecule=True)
-
-print("Evaluating...")
-pgexplainer_edges.device = explainer.device
-data = dataset[0]
-node_indices = torch.where(data.test_mask * data.y != 0)[0].tolist()
-predictions = glnn(x).log_softmax(dim=-1).argmax(dim=-1)
-for node_idx in node_indices:
-    index += 1
-    with torch.no_grad():
-        edge_masks, hard_edge_masks, related_preds = \
-            pgexplainer_edges(x, 
-                              edge_index=data.edge_index,
-                              node_idx=node_idx,
-                              num_classes=dataset.num_classes,
-                              sparsity=0.5,
-                              pred_label=predictions[node_idx].item())
-        edge_masks = [mask.detach() for mask in edge_masks]
-    x_collector.collect_data(edge_masks, related_preds, label=predictions[node_idx].item()) 
-
-print(f'Fidelity: {x_collector.fidelity:.4f}\n'
-      f'Fidelity_inv: {x_collector.fidelity_inv:.4f}\n'
-      f'Sparsity: {x_collector.sparsity:.4f}')
+# print("Evaluating...")
+# 
+# dataset = copy.copy(dataset[0])
+# dataset.x = x
+# accuracy = explainer.test_explanation_network(dataset)
+# print(f"Pred acc: {accuracy}")

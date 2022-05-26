@@ -602,12 +602,49 @@ class PGExplainer(nn.Module):
         self.__clear_masks__()
         return probs, edge_mask
 
+    def test_explanation_network(self, data, tmp=1.0):
+        self.model.eval()
+        explain_node_index_list = torch.where(data.test_mask)[0].tolist()
+        correct = 0
+        pred_dict = {}
+        logits = self.model(data.x).log_softmax(dim=-1)
+        for node_idx in explain_node_index_list:
+            pred_dict[node_idx] = logits[node_idx].argmax(-1).item()
+
+        for iter_idx, node_idx in enumerate(explain_node_index_list):
+            with torch.no_grad():
+                x, edge_index, y, subset, _ = self.get_subgraph(node_idx=node_idx, x=data.x, edge_index=data.edge_index, y=data.y)
+                new_node_index = int(torch.where(subset == node_idx)[0])
+                col, row = edge_index
+                f = self.model(data.x).log_softmax(dim=1)
+                f1 = f[col]
+                f2 = f[row]
+                self_embed = f[new_node_index]
+
+            pred, _ = self.explain(
+                    x,
+                    edge_index,
+                    f1,
+                    f2,
+                    self_embed,
+                    tmp,
+                    training=False
+            )
+
+            pred_label = pred[new_node_index].argmax(-1) 
+            y_label = pred_dict[node_idx]
+            if pred_label == y_label:
+                correct += 1
+
+        self.model.train()
+        return correct / len(explain_node_index_list)
+
     def train_explanation_network(self, dataset):
         r""" training the explanation network by gradient descent(GD) using Adam optimizer """
         optimizer = Adam(self.elayers.parameters(), lr=self.lr)
         
         with torch.no_grad():
-            data = dataset[0]
+            data = dataset
             data.to(self.device)
             self.model.eval()
             explain_node_index_list = torch.where(data.train_mask)[0].tolist()
@@ -650,6 +687,8 @@ class PGExplainer(nn.Module):
             optimizer.step()
             duration += time.perf_counter() - tic
             print(f'Epoch: {epoch} | Loss: {loss/len(explain_node_index_list)}')
+            accuracy = self.test_explanation_network(dataset)
+            print(f"Test accuracy: {accuracy}")
         print(f"training time is {duration:.5}s")
 
     def forward(self,
